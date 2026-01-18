@@ -1,0 +1,1517 @@
+/*    perly.y
+ *
+ *    Copyright (c) 1991-2002, 2003, 2004, 2005, 2006 Larry Wall
+ *    Copyright (c) 2007, 2008, 2009, 2010, 2011 by Larry Wall and others
+ *
+ *    You may distribute under the terms of either the GNU General Public
+ *    License or the Artistic License, as specified in the README file.
+ *
+ */
+
+/*
+ * 'I see,' laughed Strider.  'I look foul and feel fair.  Is that it?
+ *  All that is gold does not glitter, not all those who wander are lost.'
+ *
+ *     [p.171 of _The Lord of the Rings_, I/x: "Strider"]
+ */
+
+/*
+ * This file holds the grammar for the Perl language. If edited, you need
+ * to run regen_perly.pl, which re-creates the files perly.h, perly.tab
+ * and perly.act which are derived from this.
+ *
+ * The main job of this grammar is to call the various newFOO()
+ * functions in op.c to build a syntax tree of OP structs.
+ * It relies on the lexer in toke.c to do the tokenizing.
+ *
+ * Note: due to the way that the cleanup code works WRT to freeing ops on
+ * the parse stack, it is dangerous to assign to the $n variables within
+ * an action.
+ */
+
+/*  Make the parser re-entrant. */
+
+%define api.pure
+
+%start grammar
+
+%union {
+    I32	ival; /* __DEFAULT__ (marker for regen_perly.pl;
+				must always be 1st union member) */
+    void *pval;
+    OP *opval;
+    GV *gvval;
+}
+
+%token <ival> GRAMPROG GRAMEXPR GRAMBLOCK GRAMBARESTMT GRAMFULLSTMT GRAMSTMTSEQ GRAMSUBSIGNATURE
+
+/* Tokens emitted by toke.c for simple punctiation characters - &, {, }, etc... */
+%token <ival> PERLY_AMPERSAND
+%token <ival> PERLY_BRACE_OPEN
+%token <ival> PERLY_BRACE_CLOSE
+%token <ival> PERLY_BRACKET_OPEN
+%token <ival> PERLY_BRACKET_CLOSE
+%token <ival> PERLY_COMMA
+%token <ival> PERLY_DOLLAR
+%token <ival> PERLY_DOT
+%token <ival> PERLY_EQUAL_SIGN
+%token <ival> PERLY_MINUS
+%token <ival> PERLY_PERCENT_SIGN
+%token <ival> PERLY_PLUS
+%token <ival> PERLY_SEMICOLON
+%token <ival> PERLY_SLASH
+%token <ival> PERLY_SNAIL
+%token <ival> PERLY_STAR
+
+/* Tokens emitted by toke.c on simple keywords */
+%token <ival> KW_FORMAT KW_PACKAGE KW_CLASS
+%token <ival> KW_LOCAL KW_MY KW_FIELD
+%token <ival> KW_IF KW_ELSE KW_ELSIF KW_UNLESS
+%token <ival> KW_FOR KW_UNTIL KW_WHILE KW_CONTINUE
+%token <ival> KW_GIVEN KW_WHEN KW_DEFAULT
+%token <ival> KW_TRY KW_CATCH KW_FINALLY KW_DEFER
+%token <ival> KW_REQUIRE KW_DO
+
+/* The 'use' and 'no' keywords both emit this */
+%token <ival> KW_USE_or_NO
+
+/* The 'sub' keyword is a bit special; four different tokens depending on
+ *   named-vs-anon, and whether signatures are in effect */
+%token <ival> KW_SUB_named KW_SUB_named_sig KW_SUB_anon KW_SUB_anon_sig
+%token <ival> KW_METHOD_named KW_METHOD_anon
+
+/* Tokens emitted in other situations */
+%token <opval> BAREWORD METHCALL0 METHCALL ATTRLIST THING PMFUNC PRIVATEREF QWLIST
+%token <opval> FUNC0OP FUNC0SUB UNIOPSUB LSTOPSUB
+%token <opval> PLUGEXPR PLUGSTMT
+%token <opval> LABEL PROTOTYPE
+%token <ival> LOOPEX DOTDOT YADAYADA
+%token <ival> FUNC0 FUNC1 FUNC UNIOP LSTOP BLKLSTOP
+%token <ival> POWOP MULOP ADDOP
+%token <ival> DOLSHARP HASHBRACK NOAMP
+%token <ival> COLONATTR FORMLBRACK FORMRBRACK
+%token <ival> SUBLEXSTART SUBLEXEND
+%token <ival> PHASER
+
+%type <ival> grammar remember mremember
+
+%type <opval> bare_statement_block
+%type <opval> bare_statement_class_declaration
+%type <opval> bare_statement_class_definition
+%type <opval> bare_statement_default
+%type <opval> bare_statement_defer
+%type <opval> bare_statement_expression
+%type <opval> bare_statement_field_declaration
+%type <opval> bare_statement_for
+%type <opval> bare_statement_format
+%type <opval> bare_statement_given
+%type <opval> bare_statement_if
+%type <opval> bare_statement_null
+%type <opval> bare_statement_package_declaration
+%type <opval> bare_statement_package_definition
+%type <opval> bare_statement_phaser
+%type <opval> bare_statement_sub_signature
+%type <opval> bare_statement_sub_traditional
+%type <opval> bare_statement_try_catch
+%type <opval> bare_statement_unless
+%type <opval> bare_statement_until
+%type <opval> bare_statement_utilize
+%type <opval> bare_statement_when
+%type <opval> bare_statement_while
+%type <opval> bare_statement_yadayada
+
+%type <ival>  startsub startanonsub startanonmethod startformsub
+
+%type <ival> mintro
+
+%type <ival>  sigsub_or_method_named
+%type <opval> stmtseq fullstmt labfullstmt barestmt block mblock else finally
+%type <opval> expr term subscripted scalar ary hsh arylen star amper sideff
+%type <opval> condition
+%type <opval> catch_paren
+%type <opval> empty
+%type <opval> sliceme kvslice gelem
+%type <opval> listexpr nexpr texpr iexpr mexpr mnexpr
+%type <opval> optlistexpr optexpr optrepl indirob listop methodname
+%type <opval> formname subname proto cont my_scalar my_var
+%type <opval> list_of_scalars my_list_of_scalars refgen_topic formblock
+%type <opval> subattrlist attrlist optattrlist myattrterm myterm
+%type <pval>  fieldvar /* pval is PADNAME */
+%type <opval> fielddecl
+%type <opval> termbinop termunop anonymous termdo
+%type <opval> termrelop relopchain termeqop eqopchain
+%type <ival>  sigslurpsigil sigvar
+%type <opval> sigscalarelem optsigscalardefault sigslurpelem
+%type <ival>  optcolon
+%type <opval> sigelem siglist optsiglist subsigguts subsignature optsubsignature
+%type <opval> subbody optsubbody sigsubbody optsigsubbody
+%type <opval> formstmtseq formline formarg
+
+%nonassoc <ival> PREC_LOW
+%nonassoc LOOPEX
+
+%nonassoc <pval> PLUGIN_LOW_OP
+%left <ival> OROP <pval> PLUGIN_LOGICAL_OR_LOW_OP
+%left <ival> ANDOP <pval> PLUGIN_LOGICAL_AND_LOW_OP
+%right <ival> NOTOP
+%nonassoc LSTOP LSTOPSUB BLKLSTOP
+%left PERLY_COMMA
+%right <ival> ASSIGNOP <pval> PLUGIN_ASSIGN_OP
+%right <ival> PERLY_QUESTION_MARK PERLY_COLON
+%nonassoc DOTDOT
+%left <ival> OROR DORDOR <pval> PLUGIN_LOGICAL_OR_OP
+%left <ival> ANDAND <pval> PLUGIN_LOGICAL_AND_OP
+%left <ival> BITOROP
+%left <ival> BITANDOP
+%left <ival> CHEQOP NCEQOP
+%left <ival> CHRELOP NCRELOP
+%nonassoc <pval> PLUGIN_REL_OP
+%nonassoc UNIOP UNIOPSUB
+%nonassoc KW_REQUIRE
+%left <ival> SHIFTOP
+%left ADDOP <pval> PLUGIN_ADD_OP
+%left MULOP <pval> PLUGIN_MUL_OP
+%left <ival> MATCHOP
+%right <ival> PERLY_EXCLAMATION_MARK PERLY_TILDE UMINUS REFGEN
+%right POWOP <pval> PLUGIN_POW_OP
+%nonassoc <ival> PREINC PREDEC POSTINC POSTDEC POSTJOIN
+%nonassoc <pval> PLUGIN_HIGH_OP
+%left <ival> ARROW
+%nonassoc <ival> PERLY_PAREN_CLOSE
+%left <ival> PERLY_PAREN_OPEN
+%left PERLY_BRACKET_OPEN PERLY_BRACE_OPEN
+
+%% /* RULES */
+
+/* Top-level choice of what kind of thing yyparse was called to parse */
+grammar	:	GRAMPROG
+			{
+			 
+			}
+		remember stmtseq
+			{
+			 
+			}
+	|	GRAMEXPR
+			{
+			}
+		optexpr
+			{
+			  
+			}
+	|	GRAMBLOCK
+			{
+			  
+			}
+		block
+			{
+			 
+			}
+	|	GRAMBARESTMT
+			{
+			  
+			}
+		barestmt
+			{
+			}
+	|	GRAMFULLSTMT
+			{
+			}
+		fullstmt
+			{
+			}
+	|	GRAMSTMTSEQ
+			{
+			
+			}
+		stmtseq
+			{
+			}
+	|	GRAMSUBSIGNATURE
+			{
+			 
+			}
+		subsigguts
+			{
+			  
+			}
+	;
+
+bare_statement_block
+	:	block
+		cont
+		{
+		
+		}
+	;
+
+bare_statement_class_declaration
+	:	KW_CLASS
+		BAREWORD[version]
+		BAREWORD[package]
+		optattrlist
+		PERLY_SEMICOLON
+		{
+			
+			
+		}
+	;
+
+bare_statement_class_definition
+	:	KW_CLASS
+		BAREWORD[version]
+		BAREWORD[package]
+		optattrlist
+		PERLY_BRACE_OPEN
+		remember
+		{
+		
+		}
+		stmtseq
+		PERLY_BRACE_CLOSE
+		{
+			
+		}
+	;
+
+bare_statement_default
+	:	KW_DEFAULT
+		block
+		{
+			
+		}
+	;
+
+bare_statement_defer
+	:	KW_DEFER mblock
+		{
+			
+		}
+	;
+
+bare_statement_expression
+	/* expression when used as a statement */
+	:	sideff PERLY_SEMICOLON
+		{
+	
+		}
+	;
+
+bare_statement_field_declaration
+	:	fielddecl
+		PERLY_SEMICOLON
+		{
+			
+		}
+	;
+
+bare_statement_for
+	:	KW_FOR
+		PERLY_PAREN_OPEN
+		remember
+		mnexpr[init_mnexpr]
+		PERLY_SEMICOLON
+		{
+			
+		}
+		texpr
+		PERLY_SEMICOLON
+		{
+			
+		}
+		mintro
+		mnexpr[iterate_mnexpr]
+		PERLY_PAREN_CLOSE
+		mblock
+		{
+				
+			
+		}
+	|	KW_FOR
+		KW_MY
+		remember
+		my_scalar
+		PERLY_PAREN_OPEN
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		cont
+		{
+			
+		}
+	|	KW_FOR
+		KW_MY
+		remember
+		PERLY_PAREN_OPEN
+		my_list_of_scalars
+		PERLY_PAREN_CLOSE
+		PERLY_PAREN_OPEN
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		cont
+		{
+			
+		}
+	|	KW_FOR
+		scalar
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		cont
+		{
+		}
+	|	KW_FOR
+		my_refgen
+		remember
+		my_var
+		{
+			
+		}[variable]
+		PERLY_PAREN_OPEN
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		cont
+		{
+		
+			
+		}
+	|	KW_FOR
+		REFGEN
+		refgen_topic
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		cont
+		{
+		}
+	|	KW_FOR
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		cont
+		{
+			
+		}
+	;
+
+bare_statement_format
+	:	KW_FORMAT
+		startformsub
+		formname
+		formblock
+		{
+			
+		}
+	;
+
+bare_statement_given
+	:	KW_GIVEN
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		{
+			
+		}
+	;
+
+bare_statement_if
+	:	KW_IF
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		else
+		{
+			
+		}
+	;
+
+bare_statement_null
+	:	PERLY_SEMICOLON
+		{
+			
+		}
+	;
+
+bare_statement_package_declaration
+	:	KW_PACKAGE
+		BAREWORD[version]
+		BAREWORD[package]
+		PERLY_SEMICOLON
+		/* version and package appear in the reverse order to what may be
+		 * expected, because toke.c has already pushed both of them to a stack
+		 * by calling force_next() from within force_version().
+		 * When the parser pops them back out again they appear swapped
+		 */
+		{
+			
+		}
+	;
+
+bare_statement_package_definition
+	:	KW_PACKAGE
+		BAREWORD[version]
+		BAREWORD[package]
+		PERLY_BRACE_OPEN
+		remember
+		{
+			
+		}
+		stmtseq
+		PERLY_BRACE_CLOSE
+		{
+      
+		}
+	;
+
+bare_statement_phaser
+	:	PHASER
+		startsub
+		{
+		
+			
+		}
+		optsubbody
+		{
+		
+		
+		}
+	;
+
+bare_statement_sub_signature
+	/* sub declaration or definition under 'use feature * "signatures"'.
+	 * (Note that a signature isn't * allowed in a declaration)
+	 */
+	:	sigsub_or_method_named
+		subname
+		startsub
+		{
+		
+			
+		}
+		subattrlist
+		optsigsubbody
+		{
+			
+		}
+	;
+
+bare_statement_sub_traditional
+	/* sub declaration or definition not within scope of 'use feature "signatures"'*/
+	:	KW_SUB_named
+		subname
+		startsub
+		{
+			
+		}
+		proto
+		subattrlist
+		optsubbody
+		{
+			
+		}
+	;
+
+bare_statement_try_catch
+	:	KW_TRY
+		mblock[try]
+		KW_CATCH
+		remember
+		catch_paren[scalar]
+		{
+			
+		}
+		mblock[catch]
+		finally
+		{
+		}
+	;
+
+bare_statement_unless
+	:	KW_UNLESS
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		else
+		{
+			
+		}
+	;
+
+bare_statement_until
+	:	KW_UNTIL
+		PERLY_PAREN_OPEN
+		remember
+		iexpr
+		PERLY_PAREN_CLOSE
+		mintro
+		mblock
+		cont
+		{
+
+		}
+	;
+
+bare_statement_utilize
+	:	KW_USE_or_NO
+		startsub
+		{ 
+		}
+	;
+
+bare_statement_when
+	:	KW_WHEN
+		PERLY_PAREN_OPEN
+		remember
+		mexpr
+		PERLY_PAREN_CLOSE
+		mblock
+		{
+			
+		}
+	;
+
+bare_statement_while
+	:	KW_WHILE
+		PERLY_PAREN_OPEN
+		remember
+		texpr
+		PERLY_PAREN_CLOSE
+		mintro
+		mblock
+		cont
+		{
+		}
+	;
+
+bare_statement_yadayada
+	:	YADAYADA PERLY_SEMICOLON
+		{
+		
+		}
+	;
+
+/* Either a signatured 'sub' or 'method' keyword */
+sigsub_or_method_named
+	:	KW_SUB_named_sig
+			{ }
+	|	KW_METHOD_named
+			{ }
+	;
+
+/* An ordinary block */
+block	:	PERLY_BRACE_OPEN remember stmtseq PERLY_BRACE_CLOSE
+			{ 
+			}
+	;
+
+empty
+	:	%empty          {  }
+	;
+
+/* format body */
+formblock:	PERLY_EQUAL_SIGN remember PERLY_SEMICOLON FORMRBRACK formstmtseq PERLY_SEMICOLON PERLY_DOT
+			{ 
+			}
+	;
+
+remember:	%empty	/* start a full lexical scope */
+			{ }
+	;
+
+mblock	:	PERLY_BRACE_OPEN mremember stmtseq PERLY_BRACE_CLOSE
+			{ 
+			}
+	;
+
+mremember:	%empty	/* start a partial lexical scope */
+			{  }
+	;
+
+/* The parenthesized variable of a catch block */
+catch_paren:	empty
+			/* not really valid grammar but we detect it in the
+			 * action block to throw a nicer error message */
+	|	PERLY_PAREN_OPEN
+			{  }
+		scalar
+			{  }
+		PERLY_PAREN_CLOSE
+			{  }
+	;
+
+/* A sequence of statements in the program */
+stmtseq
+	:	empty
+	|	stmtseq[list] fullstmt
+			{   
+			}
+	;
+
+/* A sequence of format lines */
+formstmtseq
+	:	empty
+	|	formstmtseq[list] formline
+			{  
+			}
+	;
+
+/* A statement in the program, including optional labels */
+fullstmt:	barestmt
+			{
+			}
+	|	labfullstmt
+			{ }
+	;
+
+labfullstmt:	LABEL barestmt
+			{
+                         
+			}
+	|	LABEL labfullstmt[list]
+			{
+                        
+			}
+	;
+
+/* A bare statement, lacking label and other aspects of state op
+ *
+ * Maintain rule as simple alternatives of single nonterminals,
+ * leveraging bison's default action: $$ = $1.
+ *
+ * Try to keep nonterminals alphabetically sorted.
+ */
+barestmt
+	:	PLUGSTMT
+	|	bare_statement_block
+	|	bare_statement_class_declaration
+	|	bare_statement_class_definition
+	|	bare_statement_default
+	|	bare_statement_defer
+	|	bare_statement_expression
+	|	bare_statement_field_declaration
+	|	bare_statement_for
+	|	bare_statement_format
+	|	bare_statement_given
+	|	bare_statement_if
+	|	bare_statement_null
+	|	bare_statement_package_declaration
+	|	bare_statement_package_definition
+	|	bare_statement_phaser
+	|	bare_statement_sub_signature
+	|	bare_statement_sub_traditional
+	|	bare_statement_try_catch
+	|	bare_statement_unless
+	|	bare_statement_until
+	|	bare_statement_utilize
+	|	bare_statement_when
+	|	bare_statement_while
+	|	bare_statement_yadayada
+	;
+
+/* Format line */
+formline:	THING formarg
+			{ 
+			  }
+	;
+
+formarg
+	:	empty
+	|	FORMLBRACK stmtseq FORMRBRACK
+			{  }
+	;
+
+condition: expr
+;
+
+/* An expression which may have a side-effect */
+sideff	:	error
+			{ }
+	|	expr[body]
+			{ ; }
+	|	expr[body] KW_IF condition
+			{  }
+	|	expr[body] KW_UNLESS condition
+			{  }
+	|	expr[body] KW_WHILE condition
+			{  }
+	|	expr[body] KW_UNTIL iexpr
+			{  }
+	|	expr[body] KW_FOR condition
+			{  }
+	|	expr[body] KW_WHEN condition
+			{  }
+	;
+
+/* else and elsif blocks */
+else
+	:	empty
+	|	KW_ELSE mblock
+			{
+			  
+			}
+	|	KW_ELSIF PERLY_PAREN_OPEN mexpr PERLY_PAREN_CLOSE mblock else[else.recurse]
+			{ 
+			}
+	;
+
+/* Continue blocks */
+cont
+	:	empty
+	|	KW_CONTINUE block
+			{  }
+	;
+
+/* Finally blocks */
+finally	:	%empty
+			{  }
+	|	KW_FINALLY block
+			{  }
+	;
+
+/* determine whether there are any new my declarations */
+mintro	:	%empty
+			{  }
+
+/* Normal expression */
+nexpr
+	:	empty
+	|	sideff
+	;
+
+/* Boolean expression */
+texpr	:	%empty /* NULL means true */
+			{  }
+	|	expr
+	;
+
+/* Inverted boolean expression */
+iexpr	:	expr
+			{  }
+	;
+
+/* Expression with its own lexical scope */
+mexpr	:	expr
+			{  }
+	;
+
+mnexpr	:	nexpr
+			{  }
+	;
+
+formname:	BAREWORD	{  }
+	|	empty
+	;
+
+startsub:	%empty	/* start a regular subroutine scope */
+			{  }
+
+	;
+
+startanonsub:	%empty	/* start an anonymous subroutine scope */
+			{  }
+	;
+
+startanonmethod:	%empty	/* start an anonymous method scope */
+			{  }
+	;
+
+startformsub:	%empty	/* start a format subroutine scope */
+			{ }
+	;
+
+/* Name of a subroutine - must be a bareword, could be special */
+subname	:	BAREWORD
+	|	PRIVATEREF
+	;
+
+/* Subroutine prototype */
+proto
+	:	empty
+	|	PROTOTYPE
+	;
+
+/* Optional list of subroutine attributes */
+subattrlist
+	:	empty
+	|	COLONATTR ATTRLIST
+			{
+			  
+			}
+	|	COLONATTR
+			{  }
+	;
+
+/* List of attributes for some other kind of declaration (variables, classes) */
+attrlist:	COLONATTR ATTRLIST
+			{  }
+	|	COLONATTR
+			{  }
+	;
+
+optattrlist
+	:	empty
+	|	attrlist
+	;
+
+
+/* --------------------------------------
+ * subroutine signature parsing
+ */
+
+/* the '' or 'foo' part of a '$' or '@foo' etc signature variable  */
+sigvar:     %empty
+			{  }
+        |       PRIVATEREF
+                        {  }
+	;
+
+sigslurpsigil:
+                PERLY_SNAIL
+                        {  }
+        |       PERLY_PERCENT_SIGN
+                        {  }
+
+/* @, %, @foo, %foo */
+sigslurpelem: sigslurpsigil sigvar
+                        {
+                           
+                        }
+        |     sigslurpsigil sigvar ASSIGNOP
+                        {
+                        }
+        |     sigslurpsigil sigvar ASSIGNOP term
+                        {
+			   
+                        }
+        ;
+
+optcolon:       %empty
+                        {  }
+        |       PERLY_COLON
+                        {  }
+        ;
+
+/* subroutine signature scalar element: e.g. '$x', '$=', '$x = $default' */
+sigscalarelem:
+                optcolon PERLY_DOLLAR sigvar
+                        {
+                          
+                        }
+        |       optcolon PERLY_DOLLAR sigvar ASSIGNOP optsigscalardefault
+                        {
+                            
+                        }
+        ;
+
+optsigscalardefault:
+                %empty
+                        {  }
+        |       term
+        ;
+
+
+/* subroutine signature element: e.g. '$x = $default' or '%h' */
+sigelem:        sigscalarelem
+                        {  }
+        |       sigslurpelem
+                        {  }
+	;
+
+/* list of subroutine signature elements
+ * These parser tokens no longer emit anything; they are combined just for
+ * their side-effect on the parser structures. */
+siglist:
+	 	siglist[list] PERLY_COMMA
+	|	siglist[list] PERLY_COMMA sigelem[element]
+        |	sigelem[element]  %prec PREC_LOW
+	;
+
+/* () or (....) */
+optsiglist
+	:	empty
+	|	siglist
+	;
+
+/* optional subroutine signature */
+optsubsignature
+	:	empty
+	|	subsignature
+	;
+
+/* Subroutine signature */
+subsignature:	PERLY_PAREN_OPEN subsigguts PERLY_PAREN_CLOSE
+			{ }
+
+subsigguts:
+                        {
+                         
+                        }
+                optsiglist
+			{
+			    
+
+			   
+			}
+	;
+
+/* Optional subroutine body (for named subroutine declaration) */
+optsubbody
+	:	subbody
+	|	PERLY_SEMICOLON	{ }
+	;
+
+
+/* Subroutine body (without signature) */
+subbody:	remember  PERLY_BRACE_OPEN stmtseq PERLY_BRACE_CLOSE
+			{
+			  
+			}
+	;
+
+
+/* optional [ Subroutine body with optional signature ] (for named
+ * subroutine declaration) */
+optsigsubbody
+	:	sigsubbody
+	|	PERLY_SEMICOLON	   {  }
+	;
+
+/* Subroutine body with optional signature */
+sigsubbody:	remember optsubsignature PERLY_BRACE_OPEN 
+			{ }
+		stmtseq PERLY_BRACE_CLOSE
+			{
+			  
+ 			}
+ 	;
+
+
+/* Ordinary expressions; logical combinations */
+expr	:	expr[lhs] ANDOP expr[rhs]
+			{  }
+	|	expr[lhs] PLUGIN_LOGICAL_AND_LOW_OP[op] expr[rhs]
+			{  }
+	|	expr[lhs] OROP[operator] expr[rhs]
+			{  }
+	|	expr[lhs] PLUGIN_LOGICAL_OR_LOW_OP[op] expr[rhs]
+			{ }
+	|	listexpr %prec PREC_LOW
+	;
+
+/* Expressions are a list of terms joined by commas */
+listexpr:	listexpr[list] PERLY_COMMA
+			{ }
+	|	listexpr[list] PERLY_COMMA term
+			{
+			 
+			}
+	|	term %prec PREC_LOW
+	;
+
+/* List operators */
+listop	:	LSTOP indirob listexpr /* map {...} @args or print $fh @args */
+			{ 
+			}
+        |       BLKLSTOP block listexpr /* all/any { ... } @args */
+                        {
+                        }
+	|	FUNC PERLY_PAREN_OPEN indirob expr PERLY_PAREN_CLOSE      /* print ($fh @args */
+			{
+			}
+	|	term ARROW methodname PERLY_PAREN_OPEN optexpr PERLY_PAREN_CLOSE /* $foo->bar(list) */
+			{ 
+			}
+	|	term ARROW methodname                     /* $foo->bar */
+			{ 
+			}
+	|       term ARROW PERLY_AMPERSAND subname[method] PERLY_PAREN_OPEN optexpr PERLY_PAREN_CLOSE /* $foo->&bar(list) */
+			{
+			}
+	|       term ARROW PERLY_AMPERSAND subname[method] /* $foo->&bar */
+			{ 
+			}
+	|	METHCALL0 indirob optlistexpr           /* new Class @args */
+			{ 
+			}
+	|	METHCALL indirob PERLY_PAREN_OPEN optexpr PERLY_PAREN_CLOSE    /* method $object (@args) */
+			{ 
+			}
+	|	LSTOP optlistexpr                    /* print @args */
+			{  }
+	|	FUNC PERLY_PAREN_OPEN optexpr PERLY_PAREN_CLOSE                 /* print (@args) */
+			{  }
+	|	FUNC SUBLEXSTART optexpr SUBLEXEND          /* uc($arg) from "\U..." */
+			{ }
+	|	LSTOPSUB startanonsub block /* sub f(&@);   f { } ... */
+			{  }[anonattrsub]
+		    optlistexpr		%prec LSTOP  /* ... @bar */
+			{
+			}
+	;
+
+/* Names of methods. May use $object->$methodname */
+methodname:	METHCALL0
+	|	scalar
+	;
+
+/* Some kind of subscripted expression */
+subscripted:    gelem PERLY_BRACE_OPEN expr PERLY_SEMICOLON PERLY_BRACE_CLOSE        /* *main::{something} */
+                        /* In this and all the hash accessors, PERLY_SEMICOLON is
+                         * provided by the tokeniser */
+			{  }
+	|	scalar[array] PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE          /* $array[$element] */
+			{ 
+			}
+	|	term[array_reference] ARROW PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE      /* somearef->[$element] */
+			{
+			}
+	|	subscripted[array_reference] PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE    /* $foo->[$bar]->[$baz] */
+			{ 
+			}
+	|	scalar[hash] PERLY_BRACE_OPEN expr PERLY_SEMICOLON PERLY_BRACE_CLOSE    /* $foo{bar();} */
+			{ 
+			}
+	|	term[hash_reference] ARROW PERLY_BRACE_OPEN expr PERLY_SEMICOLON PERLY_BRACE_CLOSE /* somehref->{bar();} */
+			{ }
+	|	subscripted[hash_reference] PERLY_BRACE_OPEN expr PERLY_SEMICOLON PERLY_BRACE_CLOSE /* $foo->[bar]->{baz;} */
+			{  }
+	|	term[code_reference] ARROW PERLY_PAREN_OPEN PERLY_PAREN_CLOSE          /* $subref->() */
+			{ 
+			}
+	|	term[code_reference] ARROW PERLY_PAREN_OPEN expr PERLY_PAREN_CLOSE     /* $subref->(@args) */
+			{ 
+			}
+
+	|	subscripted[code_reference] PERLY_PAREN_OPEN expr PERLY_PAREN_CLOSE   /* $foo->{bar}->(@args) */
+			{
+			}
+	|	subscripted[code_reference] PERLY_PAREN_OPEN PERLY_PAREN_CLOSE        /* $foo->{bar}->() */
+			{ 
+			}
+	|	PERLY_PAREN_OPEN expr[list] PERLY_PAREN_CLOSE PERLY_BRACKET_OPEN expr[slice] PERLY_BRACKET_CLOSE            /* list slice */
+			{  }
+	|	QWLIST PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE            /* list literal slice */
+			{  }
+	|	PERLY_PAREN_OPEN PERLY_PAREN_CLOSE PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE                 /* empty list slice! */
+			{  }
+    ;
+
+/* Binary operators between terms */
+termbinop:	term[lhs] PLUGIN_HIGH_OP[op] term[rhs]
+			{  }
+	|	term[lhs] ASSIGNOP term[rhs]                     /* $x = $y, $x += $y */
+			{  }
+	|	term[lhs] PLUGIN_ASSIGN_OP[op] term[rhs]
+			{  }
+	|	term[lhs] POWOP term[rhs]                        /* $x ** $y */
+			{  }
+	|	term[lhs] PLUGIN_POW_OP[op] term[rhs]
+			{ }
+	|	term[lhs] MULOP term[rhs]                        /* $x * $y, $x x $y */
+			{  
+			}
+	|	term[lhs] PLUGIN_MUL_OP[op] term[rhs]
+			{ }
+	|	term[lhs] ADDOP term[rhs]                        /* $x + $y */
+			{  }
+	|	term[lhs] PLUGIN_ADD_OP[op] term[rhs]
+			{  }
+	|	term[lhs] SHIFTOP term[rhs]                      /* $x >> $y, $x << $y */
+			{  }
+	|	termrelop %prec PREC_LOW               /* $x > $y, etc. */
+			{ }
+	|	termeqop %prec PREC_LOW                /* $x == $y, $x cmp $y */
+			{  }
+	|	term[lhs] BITANDOP term[rhs]                     /* $x & $y */
+			{ }
+	|	term[lhs] BITOROP term[rhs]                      /* $x | $y */
+			{  }
+	|	term[lhs] DOTDOT term[rhs]                       /* $x..$y, $x...$y */
+			{ }
+	|	term[lhs] ANDAND term[rhs]                       /* $x && $y */
+			{ }
+	|	term[lhs] PLUGIN_LOGICAL_AND_OP[op] term[rhs]
+			{  }
+	|	term[lhs] OROR term[rhs]                         /* $x || $y */
+			{  }
+	|	term[lhs] PLUGIN_LOGICAL_OR_OP[op] term[rhs]
+			{  }
+	|	term[lhs] DORDOR term[rhs]                       /* $x // $y */
+			{  }
+	|	term[lhs] MATCHOP term[rhs]                      /* $x =~ /$y/ */
+			{  }
+	|	term[lhs] PLUGIN_LOW_OP[op] term[rhs]
+			{  }
+    ;
+
+termrelop:	relopchain %prec PREC_LOW
+			{ }
+	|	term[lhs] NCRELOP term[rhs]
+			{  }
+	|	termrelop NCRELOP
+			{  }
+	|	termrelop CHRELOP
+			{  }
+	|	term[lhs] PLUGIN_REL_OP[op] term[rhs]
+			{  }
+	;
+
+relopchain:	term[lhs] CHRELOP term[rhs]
+			{ }
+	|	relopchain[lhs] CHRELOP term[rhs]
+			{  }
+	;
+
+termeqop:	eqopchain %prec PREC_LOW
+			{  }
+	|	term[lhs] NCEQOP term[rhs]
+			{  }
+	|	termeqop NCEQOP
+			{  }
+	|	termeqop CHEQOP
+			{  }
+	;
+
+eqopchain:	term[lhs] CHEQOP term[rhs]
+			{ }
+	|	eqopchain[lhs] CHEQOP term[rhs]
+			{  }
+	;
+
+/* Unary operators and terms */
+termunop : PERLY_MINUS term %prec UMINUS                       /* -$x */
+			{ }
+	|	PERLY_PLUS term %prec UMINUS                  /* +$x */
+			{ }
+
+	|	PERLY_EXCLAMATION_MARK term                               /* !$x */
+			{  }
+	|	PERLY_TILDE term                               /* ~$x */
+			{  }
+	|	term POSTINC                           /* $x++ */
+			{  }
+	|	term POSTDEC                           /* $x-- */
+			{ }
+	|	term POSTJOIN    /* implicit join after interpolated ->@ */
+			{ 
+			}
+	|	PREINC term                            /* ++$x */
+			{ }
+	|	PREDEC term                            /* --$x */
+			{  }
+
+    ;
+
+/* Constructors for anonymous data */
+anonymous
+	:	PERLY_BRACKET_OPEN optexpr PERLY_BRACKET_CLOSE
+			{  }
+	|	HASHBRACK optexpr PERLY_SEMICOLON PERLY_BRACE_CLOSE	%prec PERLY_PAREN_OPEN /* { foo => "Bar" } */
+			{ }
+	|	KW_SUB_anon     startanonsub proto subattrlist subbody    %prec PERLY_PAREN_OPEN
+			{  }
+	|	KW_SUB_anon     startanonsub proto subattrlist            %prec PERLY_PAREN_OPEN
+			{  }
+	|	KW_SUB_anon_sig startanonsub subattrlist sigsubbody %prec PERLY_PAREN_OPEN
+			{ }
+	|	KW_SUB_anon_sig startanonsub subattrlist             %prec PERLY_PAREN_OPEN
+			{  }
+	|	KW_METHOD_anon startanonmethod subattrlist sigsubbody %prec PERLY_PAREN_OPEN
+			{
+			}
+	|	KW_METHOD_anon startanonmethod subattrlist            %prec PERLY_PAREN_OPEN
+			{  }
+    ;
+
+/* Things called with "do" */
+termdo	:       KW_DO term	%prec UNIOP                     /* do $filename */
+			{}
+	|	KW_DO block	%prec PERLY_PAREN_OPEN               /* do { code */
+			{ }
+        ;
+
+term[product]	:	termbinop
+	|	termunop
+	|	anonymous
+	|	termdo
+	|	term[condition] PERLY_QUESTION_MARK term[then] PERLY_COLON term[else]
+			{  }
+	|	REFGEN term[operand]                          /* \$x, \@y, \%z */
+			{  }
+	|	myattrterm	%prec UNIOP
+			{  }
+	|	KW_LOCAL term[operand]	%prec UNIOP
+			{  }
+	|	PERLY_PAREN_OPEN expr PERLY_PAREN_CLOSE
+			{  }
+	|	QWLIST
+			{}
+	|	PERLY_PAREN_OPEN PERLY_PAREN_CLOSE
+			{  }
+	|	scalar	%prec PERLY_PAREN_OPEN
+			{ }
+	|	star	%prec PERLY_PAREN_OPEN
+			{  }
+	|	hsh 	%prec PERLY_PAREN_OPEN
+			{  }
+	|	ary 	%prec PERLY_PAREN_OPEN
+			{ }
+	|	arylen 	%prec PERLY_PAREN_OPEN                    /* $#x, $#{ something } */
+			{ }
+	|       subscripted
+			{  }
+	|	sliceme PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE                     /* array slice */
+			{ 
+			  
+			}
+	|	kvslice PERLY_BRACKET_OPEN expr PERLY_BRACKET_CLOSE                 /* array key/value slice */
+			{
+			}
+	|	sliceme PERLY_BRACE_OPEN expr PERLY_SEMICOLON PERLY_BRACE_CLOSE                 /* @hash{@keys} */
+			{ 
+			}
+	|	kvslice PERLY_BRACE_OPEN expr PERLY_SEMICOLON PERLY_BRACE_CLOSE                 /* %hash{@keys} */
+			{ 
+			}
+	|	THING	%prec PERLY_PAREN_OPEN
+			{  }
+	|	amper                                /* &foo; */
+			{  }
+	|	amper PERLY_PAREN_OPEN PERLY_PAREN_CLOSE                 /* &foo() or foo() */
+			{ 
+			}
+	|	amper PERLY_PAREN_OPEN expr PERLY_PAREN_CLOSE          /* &foo(@args) or foo(@args) */
+			{
+			 
+			}
+	|	NOAMP subname optlistexpr       /* foo @args (no parens) */
+			{
+			}
+	|	term[operand] ARROW PERLY_DOLLAR PERLY_STAR
+			{ }
+	|	term[operand] ARROW PERLY_SNAIL PERLY_STAR
+			{  }
+	|	term[operand] ARROW PERLY_PERCENT_SIGN PERLY_STAR
+			{  }
+	|	term[operand] ARROW PERLY_AMPERSAND PERLY_STAR
+			{  }
+	|	term[operand] ARROW PERLY_STAR PERLY_STAR	%prec PERLY_PAREN_OPEN
+			{  }
+	|	LOOPEX  /* loop exiting command (goto, last, dump, etc) */
+			{ }
+	|	LOOPEX term[operand]
+			{  }
+	|	NOTOP listexpr                       /* not $foo */
+			{  }
+	|	UNIOP                                /* Unary op, $_ implied */
+			{  }
+	|	UNIOP block                          /* eval { foo }* */
+			{  }
+	|	UNIOP term[operand]                           /* Unary op */
+			{ }
+	|	KW_REQUIRE                              /* require, $_ implied */
+			{ }
+	|	KW_REQUIRE term[operand]                         /* require Foo */
+			{  }
+	|	UNIOPSUB
+			{  }
+	|	UNIOPSUB term[operand]                        /* Sub treated as unop */
+			{  }
+	|	FUNC0                                /* Nullary operator */
+			{  }
+	|	FUNC0 PERLY_PAREN_OPEN PERLY_PAREN_CLOSE
+			{}
+	|	FUNC0OP       /* Same as above, but op created in toke.c */
+			{  }
+	|	FUNC0OP PERLY_PAREN_OPEN PERLY_PAREN_CLOSE
+			{ }
+	|	FUNC0SUB                             /* Sub treated as nullop */
+			{  }
+	|	FUNC1 PERLY_PAREN_OPEN PERLY_PAREN_CLOSE                        /* not () */
+			{  }
+	|	FUNC1 PERLY_PAREN_OPEN expr PERLY_PAREN_CLOSE                   /* not($foo) */
+			{  }
+	|	PMFUNC /* m//, s///, qr//, tr/// */
+			{
+			  
+			}
+		    SUBLEXSTART listexpr optrepl SUBLEXEND
+			{  }
+	|	BAREWORD
+	|	listop
+	|	PLUGEXPR
+	;
+
+/* "my" declarations, with optional attributes */
+myattrterm
+	:	KW_MY myterm attrlist
+			{ }
+	|	KW_MY myterm
+			{  }
+	|	KW_MY REFGEN myterm attrlist
+			{ }
+	|	KW_MY REFGEN term[operand]
+			{ }
+	;
+
+/* Things that can be "my"'d */
+myterm	:	PERLY_PAREN_OPEN expr PERLY_PAREN_CLOSE
+			{ }
+	|	PERLY_PAREN_OPEN PERLY_PAREN_CLOSE
+			{ }
+
+	|	scalar	%prec PERLY_PAREN_OPEN
+			{ }
+	|	hsh 	%prec PERLY_PAREN_OPEN
+			{ }
+	|	ary 	%prec PERLY_PAREN_OPEN
+			{  }
+	;
+
+/* "field" declarations */
+fieldvar:	scalar	%prec PERLY_PAREN_OPEN
+			{
+			  
+			}
+	|	hsh 	%prec PERLY_PAREN_OPEN
+			{
+			 
+			}
+	|	ary 	%prec PERLY_PAREN_OPEN
+			{
+			  
+			}
+	;
+
+fielddecl
+	:	KW_FIELD fieldvar optattrlist
+			{
+			 
+			}
+	|	KW_FIELD fieldvar optattrlist ASSIGNOP
+			{
+			  
+			}
+		term
+			{
+			 
+			}
+	;
+
+/* Basic list expressions */
+optlistexpr
+	:	empty                   %prec PREC_LOW
+	|	listexpr                %prec PREC_LOW
+	;
+
+optexpr
+	:	empty
+	|	expr
+	;
+
+optrepl
+	:	empty
+	|	PERLY_SLASH expr        {  }
+	;
+
+/* A little bit of trickery to make "for my $foo (@bar)" actually be
+   lexical */
+my_scalar:	scalar
+			{ }
+	;
+
+/* A list of scalars for "for my ($foo, $bar) (@baz)"  */
+list_of_scalars:	list_of_scalars[list] PERLY_COMMA
+			{}
+	|		list_of_scalars[list] PERLY_COMMA scalar
+			{
+			 
+			}
+	|		scalar %prec PREC_LOW
+	;
+
+my_list_of_scalars:	list_of_scalars
+			{  }
+	;
+
+my_var	:	scalar
+	|	ary
+	|	hsh
+	;
+
+refgen_topic:	my_var
+	|	amper
+	;
+
+my_refgen:	KW_MY REFGEN
+	|	REFGEN KW_MY
+	;
+
+amper	:	PERLY_AMPERSAND indirob
+			{ }
+	;
+
+scalar	:	PERLY_DOLLAR indirob
+			{  }
+	;
+
+ary	:	PERLY_SNAIL indirob
+			{ 
+			}
+	;
+
+hsh	:	PERLY_PERCENT_SIGN indirob
+			{ 
+			}
+	;
+
+arylen	:	DOLSHARP indirob
+			{  }
+	|	term ARROW DOLSHARP PERLY_STAR
+			{  }
+	;
+
+star	:	PERLY_STAR indirob
+			{  }
+	;
+
+sliceme	:	ary
+	|	term ARROW PERLY_SNAIL
+			{  }
+	;
+
+kvslice	:	hsh
+	|	term ARROW PERLY_PERCENT_SIGN
+			{ }
+	;
+
+gelem	:	star
+	|	term ARROW PERLY_STAR
+			{  }
+	;
+
+/* Indirect objects */
+indirob	:	BAREWORD
+			{ }
+	|	scalar %prec PREC_LOW
+			{  }
+	|	block
+			{  }
+
+	|	PRIVATEREF
+			{  }
+	;
